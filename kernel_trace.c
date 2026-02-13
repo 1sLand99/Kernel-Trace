@@ -13,7 +13,7 @@
 #include "kernel_trace.h"
 
 KPM_NAME("kernel_trace");
-KPM_VERSION("6.0.0");
+KPM_VERSION("6.1.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Test");
 KPM_DESCRIPTION("use uprobe trace some fun in kpm");
@@ -27,7 +27,7 @@ void (*path_put)(const struct path *path) = 0;
 void (*rcu_read_unlock)(void) = 0;
 int (*trace_printk)(unsigned long ip, const char *fmt, ...) = 0;
 
-int (*bpf_probe_read_user)(void *dst, u32 size,const void __user *unsafe_ptr) = 0;
+unsigned long (*arch_copy_from_user)(void *to, const void __user *from, unsigned long n) = 0;
 
 unsigned long (*get_unmapped_area)(struct file *file, unsigned long addr, unsigned long len,unsigned long pgoff, unsigned long flags) = 0;
 
@@ -145,22 +145,18 @@ void before_mincore(hook_fargs3_t *args, void *udata){
         }
 
         void* uuprobe_item = (void*)syscall_argn(args, 2);
-        struct uprobe_item_info *uprobe_item = NULL;
-        uprobe_item = kmalloc(sizeof(struct uprobe_item_info), GFP_KERNEL);
-        if(!uprobe_item){
-            logke("+Test-Log+ Failed to allocate memory with kmalloc\n");
-            goto error_out;
-        }
 
-        if(bpf_probe_read_user(uprobe_item,sizeof(struct uprobe_item_info),uuprobe_item)<0){
-            logke("+Test-Log+ bpf_probe_read_user error\n");
+        struct uprobe_item_info uprobe_item = {};
+
+        if(arch_copy_from_user(&uprobe_item,uuprobe_item,sizeof(struct uprobe_item_info))<0){
+            logke("+Test-Log+ arch_copy_from_user error\n");
             goto error_out;
         }
 
 
-        unsigned long fun_offset = (unsigned long)uprobe_item->fun_offset;
+        unsigned long fun_offset = (unsigned long)uprobe_item.fun_offset;
         char fun_name[MAX_FUN_NAME];
-        compat_strncpy_from_user(fun_name,uprobe_item->fun_name,sizeof(fun_name));
+        compat_strncpy_from_user(fun_name,uprobe_item.fun_name,sizeof(fun_name));
 
         int insert_ret = insert_key_value(&fun_info_tree,fun_offset,fun_name,strlen(fun_name));
         if(insert_ret==-1){
@@ -169,10 +165,9 @@ void before_mincore(hook_fargs3_t *args, void *udata){
         }
         logkd("+Test-Log+ fun_name:%s,fun_offset:%llx\n",fun_name,fun_offset);
 
-        unsigned long rfun_offset = uprobe_item->uprobe_offset;
+        unsigned long rfun_offset = uprobe_item.uprobe_offset;
         unsigned int f_idx = fun_offset >> PAGE_SHIFT;
         insert_key_value(&fix_idx_tree,rfun_offset >> PAGE_SHIFT,&f_idx,4);
-        kfree(uprobe_item);
 
         int hret = uprobe_register(inode,rfun_offset,&trace_uc);
         if(hret<0){
@@ -189,25 +184,20 @@ void before_mincore(hook_fargs3_t *args, void *udata){
 
     if(trace_flag_num==SET_TRACE_INFO){
         void* utrace_info = (void*)syscall_argn(args, 2);
-        struct trace_init_info *base_info = NULL;
-        base_info = kmalloc(sizeof(struct trace_init_info), GFP_KERNEL);
-        if(!base_info){
-            logke("+Test-Log+ Failed to allocate memory with kmalloc\n");
+        struct trace_init_info base_info = {};
+        int ret = arch_copy_from_user(&base_info,utrace_info,sizeof(struct trace_init_info));
+        if(ret <0){
+            logke("+Test-Log+ arch_copy_from_user error:%d\n",ret);
             goto error_out;
         }
 
-        if(bpf_probe_read_user(base_info,sizeof(struct trace_init_info),utrace_info)<0){
-            logke("+Test-Log+ bpf_probe_read_user error\n");
-            goto error_out;
-        }
-
-        target_uid = (uid_t)base_info->uid;
+        target_uid = (uid_t)base_info.uid;
         logkd("+Test-Log+ set target_uid:%d\n",target_uid);
 
-        module_base = (unsigned long)base_info->module_base;
+        module_base = (unsigned long)base_info.module_base;
         logkd("+Test-Log+ set module_base:0x%llx\n",module_base);
 
-        compat_strncpy_from_user(file_name,base_info->tfile_name,sizeof(file_name));
+        compat_strncpy_from_user(file_name,base_info.tfile_name,sizeof(file_name));
         logkd("+Test-Log+ set target_file_name:%s\n",file_name);
         struct path path;
         int fret = kern_path(file_name, LOOKUP_FOLLOW, &path);
@@ -220,7 +210,7 @@ void before_mincore(hook_fargs3_t *args, void *udata){
         logkd("+Test-Log+ success set file inode\n");
 
         char fix_file_name[MAX_PATH_LEN];
-        compat_strncpy_from_user(fix_file_name,base_info->fix_file_name,sizeof(fix_file_name));
+        compat_strncpy_from_user(fix_file_name,base_info.fix_file_name,sizeof(fix_file_name));
         if(strlen(fix_file_name)!=0){
             if (fix_file) {
                 filp_close(fix_file, NULL);
@@ -232,7 +222,6 @@ void before_mincore(hook_fargs3_t *args, void *udata){
             }
             logkd("+Test-Log+ set fix_file_name:%s\n",fix_file_name);
         }
-        kfree(base_info);
 
         goto success_out;
 
@@ -337,7 +326,7 @@ static long kernel_trace_init(const char *args, const char *event, void *__user 
     kfree = (typeof(kfree))kallsyms_lookup_name("kfree");
 
     trace_printk = (typeof(trace_printk))kallsyms_lookup_name("__trace_printk");
-    bpf_probe_read_user = (typeof(bpf_probe_read_user))kallsyms_lookup_name("bpf_probe_read_user");
+    arch_copy_from_user = (typeof(arch_copy_from_user))kallsyms_lookup_name("__arch_copy_from_user");
 
     get_unmapped_area = (typeof(get_unmapped_area))kallsyms_lookup_name("get_unmapped_area");
     file_path = (typeof(file_path))kallsyms_lookup_name("file_path");
@@ -375,7 +364,7 @@ static long kernel_trace_init(const char *args, const char *event, void *__user 
     logkd("+Test-Log+ kfree:%llx\n",kfree);
 
     logkd("+Test-Log+ trace_printk:%llx\n",trace_printk);
-    logkd("+Test-Log+ bpf_probe_read_user:%llx\n",bpf_probe_read_user);
+    logkd("+Test-Log+ arch_copy_from_user:%llx\n",arch_copy_from_user);
 
     logkd("+Test-Log+ get_unmapped_area:%llx\n",get_unmapped_area);
     logkd("+Test-Log+ file_path:%llx\n",file_path);
@@ -398,8 +387,8 @@ static long kernel_trace_init(const char *args, const char *event, void *__user 
     if(!(mtask_pid_nr_ns && uprobe_register && uprobe_unregister
     && kern_path && igrab && path_put && rcu_read_unlock
     && rb_erase && rb_insert_color && rb_first && trace_printk
-    && bpf_probe_read_user && get_unmapped_area && file_path && mkstrdup && filp_open && kernel_read && filp_close && vmalloc && vfree && vmalloc_to_page
-    && install_special_mapping_addr && create_xol_area_addr && do_read_cache_page_addr)){
+    && get_unmapped_area && file_path && mkstrdup && filp_open && kernel_read && filp_close && vmalloc && vfree && vmalloc_to_page
+    && install_special_mapping_addr && create_xol_area_addr && do_read_cache_page_addr && arch_copy_from_user)){
         logke("+Test-Log+ can not find some fun addr\n");
         return -1;
     }
